@@ -1,4 +1,24 @@
-# Spikeball-Rim-Detector
-This Repo Currently Contains a few Progress Images of my Progress on the Spike ball Rim Detector
+<h1>Spikeball Rim Detector</h1>
+<p>
+  <b>Arduino-based impact detection system for Spikeball games with instant LED feedback</b>
+</p>
+<b>What It Does:</b>
 
-Code Files, circuit diagrams, and demos will be added when project is fully complete.
+Detects rim hits vs net shots using MPU6500 accelerometer analysis
+Instant LED strip feedback with flash sequences
+Smart detection logic: lateral acceleration = rim hit, vertical = net shot
+Fast response: 2ms sampling with 400ms debounce protection
+
+<b>Technical Specs:</b>
+
+<code>MPU6500</code> 6-axis sensor (±8g range)
+<code>Threshold Acceleration</code> for both rim and net detection
+<code>LED strip control</code> via MOSFET switching
+
+<hr>
+<div align="center">
+  <strong>Status:</strong> Working prototype | 
+  <strong>Components:</strong> Arduino Nano + MPU6500 + LED strip
+  <br><br>
+  <em>Circuit diagrams and demo videos coming soon</em>
+</div>
