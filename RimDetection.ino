@@ -1,7 +1,8 @@
 /*
 Spikeball Impact Detection System
 Using MPU6500 6-Axis Gyroscope + Accelerometer
-  
+Author: Matthew Lee  
+
 ORIENTATION: MPU6500 should be mounted with Z-axis pointing UP (away from net surface)
   
 WIRING MPU6500:
@@ -60,6 +61,12 @@ const unsigned long DIM_HOLD = 30;
 const unsigned long FLASH_TIME = 20;    
 const unsigned long FADE_TIME = 300;    
 
+// Rim flash timing - 5 flashes over 2.5 seconds
+const int RIM_FLASH_COUNT = 5;
+const unsigned long RIM_FLASH_TOTAL_TIME = 2500; // 2.5 seconds
+const unsigned long RIM_FLASH_ON_TIME = 200;     // Each flash on time
+const unsigned long RIM_FLASH_OFF_TIME = 300;    // Each flash off time
+
 // Variables
 struct SensorData {
   float accelX, accelY, accelZ;
@@ -90,6 +97,12 @@ struct ImpactPattern {
 ImpactPattern currentPattern;
 float accelZHistory[10] = {0}; // Rolling average for Z-axis shake detection
 int historyIndex = 0;
+
+// Rim flash variables
+bool rimFlashActive = false;
+unsigned long rimFlashStartTime = 0;
+int currentRimFlash = 0;
+bool rimFlashState = false; // true = on, false = off
 
 // Calibration variables
 float accelOffsetX = 0, accelOffsetY = 0, accelOffsetZ = 0;
@@ -141,7 +154,11 @@ void loop() {
   checkForImpact();
   
   // Handle flash sequence if active
-  handleFlashSequence();
+  if (rimFlashActive) {
+    handleRimFlashSequence();
+  } else if (flashActive) {
+    handleFlashSequence();
+  }
   
   /* Remove Comment for Debugging
   static unsigned long lastPrint = 0;
@@ -259,13 +276,18 @@ void readSensorData(SensorData &data) {
 }
 
 void triggerFlash(String hitType = "unknown") {
-  if (!flashActive) {
-    flashActive = true;
-    flashStartTime = millis();
-    
-    if (hitType == "rim") {
+  if (hitType == "rim") {
+    if (!rimFlashActive) {
+      rimFlashActive = true;
+      rimFlashStartTime = millis();
+      currentRimFlash = 0;
+      rimFlashState = false;
       Serial.println("Triggering RIM flash pattern");
-    } else if (hitType == "net") {
+    }
+  } else if (hitType == "net") {
+    if (!flashActive) {
+      flashActive = true;
+      flashStartTime = millis();
       Serial.println("Triggering NET flash pattern");
     }
   }
@@ -352,7 +374,46 @@ void checkForImpact() {
   }
 }
 
-//Flash Sequence - In Progress
+//Rim Flash Sequence - 5 flashes from 80% to 5% over 2.5 seconds
+void handleRimFlashSequence() {
+  if (!rimFlashActive) {
+    analogWrite(LED_STRIP_PIN, BRIGHTNESS_MID);
+    return;
+  }
+  
+  unsigned long rimFlashElapsed = millis() - rimFlashStartTime;
+  
+  // Check if rim flash sequence is complete
+  if (rimFlashElapsed >= RIM_FLASH_TOTAL_TIME) {
+    rimFlashActive = false;
+    analogWrite(LED_STRIP_PIN, BRIGHTNESS_MID);
+    return;
+  }
+  
+  // Calculate which flash we're on (0-4)
+  unsigned long flashPeriod = RIM_FLASH_TOTAL_TIME / RIM_FLASH_COUNT;
+  currentRimFlash = rimFlashElapsed / flashPeriod;
+  
+  // Calculate brightness for current flash (80% to 5%)
+  int targetBrightness = map(currentRimFlash, 0, RIM_FLASH_COUNT - 1, 
+                            BRIGHTNESS_MID * 0.8, BRIGHTNESS_MID * 0.05);
+  
+  // Calculate timing within current flash period
+  unsigned long timeInFlash = rimFlashElapsed % flashPeriod;
+  
+  if (timeInFlash < RIM_FLASH_ON_TIME) {
+    // Flash ON
+    analogWrite(LED_STRIP_PIN, targetBrightness);
+  } else if (timeInFlash < RIM_FLASH_ON_TIME + RIM_FLASH_OFF_TIME) {
+    // Flash OFF
+    analogWrite(LED_STRIP_PIN, 0);
+  } else {
+    // Brief pause before next flash
+    analogWrite(LED_STRIP_PIN, 0);
+  }
+}
+
+//Flash Sequence - In Progress (for net hits)
 void handleFlashSequence() {
   if (!flashActive) {
     analogWrite(LED_STRIP_PIN, BRIGHTNESS_MID);
