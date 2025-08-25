@@ -46,14 +46,12 @@ const int BRIGHTNESS_LOW = 50;
 const int BRIGHTNESS_MID = 150;
 const int BRIGHTNESS_HIGH = 255;
 
-// Impact detection thresholds - Lateral (X/Y) focused for rim detection
-const float RIM_LATERAL_THRESHOLD = 0.6;    // Any significant X/Y acceleration = rim hit
-const float MIN_IMPACT_ACCEL = 0.5;         // Minimum total acceleration to register
-const float NET_HIT_ACCEL_Z = 0.6;          // Z-axis threshold for net hits
-const float NET_LATERAL_MAX = 0.6;          // Max lateral movement for pure net hits
-const float VIBRATION_THRESHOLD_Z = 0.6;    // Sustained Z-axis vibration for net
-const int IMPACT_DURATION_MIN = 10;         // Minimum impact duration (ms)
-const int DEBOUNCE_TIME = 400;              // Prevent multiple triggers
+// Impact detection thresholds
+// Based on actual data analysis: GyroY > 0 = rim hit, GyroY < 0 = net hit
+const float GYROY_THRESHOLD = 25.0;        // deg/s; minimum GyroY magnitude to consider impact
+const float TOTAL_GYRO_IMPACT = 20.0;      // deg/s; minimum total rotation to consider impact
+const int IMPACT_DURATION_MIN = 30;        // Minimum impact duration (ms) - reduced for faster response
+const int DEBOUNCE_TIME = 800;             // Prevent multiple triggers - reduced for better responsiveness
 
 // Flash timing
 const unsigned long DIM_TIME = 50;      
@@ -80,23 +78,6 @@ SensorData current, baseline;
 bool flashActive = false;
 unsigned long flashStartTime = 0;
 unsigned long lastImpactTime = 0;
-unsigned long impactStartTime = 0;
-bool impactDetected = false;
-
-// Variables for pattern analysis
-struct ImpactPattern {
-  float peakAccelZ;
-  float peakLateral;
-  float peakGyro;
-  float sustainedShakeZ;
-  unsigned long duration;
-  bool isRimHit;
-  bool isNetHit;
-};
-
-ImpactPattern currentPattern;
-float accelZHistory[10] = {0}; // Rolling average for Z-axis shake detection
-int historyIndex = 0;
 
 // Rim flash variables
 bool rimFlashActive = false;
@@ -107,6 +88,18 @@ bool rimFlashState = false; // true = on, false = off
 // Calibration variables
 float accelOffsetX = 0, accelOffsetY = 0, accelOffsetZ = 0;
 float gyroOffsetX = 0, gyroOffsetY = 0, gyroOffsetZ = 0;
+
+// Moving average filter for gyroscope data
+const int FILTER_SIZE = 5;
+float gyroYBuffer[FILTER_SIZE];
+int bufferIndex = 0;
+bool bufferFilled = false;
+
+// Peak detection variables
+float lastGyroY = 0;
+float peakGyroY = 0;
+unsigned long peakTime = 0;
+bool peakDetected = false;
 
 void setup() {
   Serial.begin(9600);
@@ -160,7 +153,15 @@ void loop() {
     handleFlashSequence();
   }
   
-  /* Remove Comment for Debugging
+  // Enable debugging output
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 100) {
+    //printDebugInfo();
+    lastPrint = millis();
+  }
+
+  // Disable constant debug output - only show impact detections
+  /*
   static unsigned long lastPrint = 0;
   if (millis() - lastPrint > 100) {
     printDebugInfo();
@@ -168,7 +169,7 @@ void loop() {
   }
   */
 
-  delay(2);
+  delay(10);
 }
 
 bool initMPU6500() {
@@ -184,16 +185,16 @@ bool initMPU6500() {
     return false;
   }
   
-  // Configure accelerometer (±8g range)
-  writeRegister(ACCEL_CONFIG, 0x10);
+  // Configure accelerometer (±4g range for better sensitivity)
+  writeRegister(ACCEL_CONFIG, 0x08);
   
-  // Configure gyroscope (±1000°/s range)
-  writeRegister(GYRO_CONFIG, 0x10);
+  // Configure gyroscope (±500°/s range for better sensitivity)
+  writeRegister(GYRO_CONFIG, 0x08);
   
   // Set sample rate divider (1kHz sample rate)
   writeRegister(0x19, 0x07);
   
-  // Configure digital low pass filter
+  // Configure digital low pass filter (bandwidth 5Hz for better noise reduction)
   writeRegister(CONFIG, 0x06);
   
   delay(100);
@@ -254,13 +255,13 @@ void readSensorData(SensorData &data) {
   int16_t gyroZ = Wire.read() << 8 | Wire.read();
   
   // Convert to meaningful units and apply calibration
-  data.accelX = (accelX / 4096.0) - accelOffsetX;  // ±8g range
-  data.accelY = (accelY / 4096.0) - accelOffsetY;
-  data.accelZ = (accelZ / 4096.0) - accelOffsetZ;  // This should be primary detection axis
+  data.accelX = (accelX / 8192.0) - accelOffsetX;  // ±4g range
+  data.accelY = (accelY / 8192.0) - accelOffsetY;
+  data.accelZ = (accelZ / 8192.0) - accelOffsetZ;  // This should be primary detection axis
   
-  data.gyroX = (gyroX / 32.8) - gyroOffsetX;  // ±1000°/s range
-  data.gyroY = (gyroY / 32.8) - gyroOffsetY;
-  data.gyroZ = (gyroZ / 32.8) - gyroOffsetZ;
+  data.gyroX = (gyroX / 65.5) - gyroOffsetX;  // ±500°/s range
+  data.gyroY = (gyroY / 65.5) - gyroOffsetY;
+  data.gyroZ = (gyroZ / 65.5) - gyroOffsetZ;
   
   // Calculate total magnitudes
   data.totalAccel = sqrt(data.accelX*data.accelX + 
@@ -273,6 +274,28 @@ void readSensorData(SensorData &data) {
   
   // Calculate lateral (X-Y plane) acceleration for rim detection
   data.lateralAccel = sqrt(data.accelX*data.accelX + data.accelY*data.accelY);
+  
+  // Apply moving average filter to GyroY
+  data.gyroY = filterGyroY(data.gyroY);
+}
+
+// Moving average filter for GyroY to reduce noise
+float filterGyroY(float newValue) {
+  gyroYBuffer[bufferIndex] = newValue;
+  bufferIndex = (bufferIndex + 1) % FILTER_SIZE;
+  
+  if (bufferIndex == 0) {
+    bufferFilled = true;
+  }
+  
+  float sum = 0;
+  int count = bufferFilled ? FILTER_SIZE : bufferIndex;
+  
+  for (int i = 0; i < count; i++) {
+    sum += gyroYBuffer[i];
+  }
+  
+  return sum / count;
 }
 
 void triggerFlash(String hitType = "unknown") {
@@ -301,77 +324,44 @@ void checkForImpact() {
     return;
   }
   
-  // Update rolling history for sustained Z-axis shake detection
-  accelZHistory[historyIndex] = abs(current.accelZ);
-  historyIndex = (historyIndex + 1) % 10;
-  
-  // Calculate sustained Z-axis shake (average of recent readings)
-  float sustainedShakeZ = 0;
-  for (int i = 0; i < 10; i++) {
-    sustainedShakeZ += accelZHistory[i];
-  }
-  sustainedShakeZ /= 10.0;
-  
-  // Analyze impact patterns - Lateral movement indicates rim hits
-  bool rimHit = false;
-  bool netHit = false;
-  
-  // Must have minimum impact to register anything
-  if (current.totalAccel < MIN_IMPACT_ACCEL) {
-    impactDetected = false;
-    return;
-  }
-  
-  // RIM HIT SIGNATURE 
-  // - ANY significant lateral (X/Y) movement indicates rim contact
-  // - Ball bouncing off rim creates sideways forces
-  if (current.lateralAccel > RIM_LATERAL_THRESHOLD) {
-    rimHit = true;
-  }
-  
-  // NET HIT SIGNATURE:
-  // - Primarily Z-axis movement (ball striking net)
-  // - Minimal lateral movement (no rim contact)
-  // - Sustained vibration as net flexes
-  else if ((abs(current.accelZ) > NET_HIT_ACCEL_Z) && 
-           (current.lateralAccel <= NET_LATERAL_MAX) &&
-           (sustainedShakeZ > VIBRATION_THRESHOLD_Z)) {
-    netHit = true;
-  }
-  
-  // Trigger detection logic
-  if (rimHit || netHit) {
-    if (!impactDetected) {
-      impactStartTime = currentTime;
-      impactDetected = true;
-      currentPattern.peakAccelZ = abs(current.accelZ);
-      currentPattern.peakLateral = current.lateralAccel;
-      currentPattern.peakGyro = current.totalGyro;
-      currentPattern.sustainedShakeZ = sustainedShakeZ;
+  // Peak detection for GyroY
+  if (abs(current.gyroY) > abs(lastGyroY) && abs(current.gyroY) > GYROY_THRESHOLD) {
+    // We're climbing towards a peak
+    if (!peakDetected) {
+      peakDetected = true;
+      peakTime = currentTime;
     }
-    
-    // Check if impact has lasted long enough
-    if ((currentTime - impactStartTime) >= IMPACT_DURATION_MIN) {
-      lastImpactTime = currentTime;
-      currentPattern.duration = (currentTime - impactStartTime);
-      impactDetected = false;
-      
-      if (rimHit) {
+    peakGyroY = current.gyroY;
+  } else if (peakDetected && (currentTime - peakTime) > 20) {
+    // Peak has passed, analyze the impact
+    if (abs(peakGyroY) > GYROY_THRESHOLD && current.totalGyro > TOTAL_GYRO_IMPACT) {
+      // Classify based on peak GyroY value
+      if (peakGyroY > GYROY_THRESHOLD) {
+        // Strongly positive GyroY = rim hit
         Serial.println(">>> RIM HIT DETECTED!");
-        Serial.print("    Lateral: "); Serial.print(currentPattern.peakLateral, 2); 
-        Serial.print("g, Z-Accel: "); Serial.print(currentPattern.peakAccelZ, 2); Serial.println("g");
+        Serial.print("    Peak GyroY: "); Serial.print(peakGyroY, 1); 
+        Serial.print("°/s, TotalGyro: "); Serial.print(current.totalGyro, 1);
+        Serial.print("°/s, Duration: "); Serial.print(currentTime - peakTime); Serial.println("ms");
         triggerFlash("rim");
-      } else if (netHit) {
+        lastImpactTime = currentTime;
+      } else if (peakGyroY < -GYROY_THRESHOLD) {
+        // Strongly negative GyroY = net hit
         Serial.println(">>> NET HIT DETECTED!");
-        Serial.print("    Z-Peak: "); Serial.print(currentPattern.peakAccelZ, 2); 
-        Serial.print("g, Lateral: "); Serial.print(currentPattern.peakLateral, 2);
-        Serial.print("g, Z-Sustained: "); Serial.print(currentPattern.sustainedShakeZ, 2); Serial.println("g");
+        Serial.print("    Peak GyroY: "); Serial.print(peakGyroY, 1); 
+        Serial.print("°/s, TotalGyro: "); Serial.print(current.totalGyro, 1);
+        Serial.print("°/s, Duration: "); Serial.print(currentTime - peakTime); Serial.println("ms");
         triggerFlash("net");
+        lastImpactTime = currentTime;
       }
     }
-  } else {
-    impactDetected = false;
+    
+    // Reset peak detection
+    peakDetected = false;
+    peakGyroY = 0;
   }
+  
+  // Update last value for next iteration
+  lastGyroY = current.gyroY;
 }
 
 //Rim Flash Sequence - 5 flashes from 80% to 5% over 2.5 seconds
@@ -466,15 +456,19 @@ uint8_t readRegister(uint8_t reg) {
 
 //Debugging
 void printDebugInfo() {
-  Serial.print("Z-Accel: ");
-  Serial.print(current.accelZ, 2);
-  Serial.print("g | Lateral: ");
-  Serial.print(current.lateralAccel, 2);
-  Serial.print("g | Gyro: ");
+  Serial.print("GyroY: ");
+  Serial.print(current.gyroY, 1);
+  Serial.print("°/s | GyroX: ");
+  Serial.print(current.gyroX, 1);
+  Serial.print("°/s | GyroZ: ");
+  Serial.print(current.gyroZ, 1);
+  Serial.print("°/s | TotalGyro: ");
   Serial.print(current.totalGyro, 1);
+  Serial.print("°/s | Threshold: ");
+  Serial.print(GYROY_THRESHOLD, 1);
   Serial.print("°/s");
   
-  if (impactDetected) {
+  if (peakDetected) { // Changed from impactDetected to peakDetected
     Serial.print(" | IMPACT DETECTED");
   }
   
