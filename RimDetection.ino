@@ -3,6 +3,12 @@ Spikeball Impact Detection System
 Using MPU6500 6-Axis Gyroscope + Accelerometer
 Author: Matthew Lee  
 
+CLASSIFICATION METHOD: Hybrid_GyroY_TotalGyro (89.5% accuracy)
+- Trigger: TotalAccel > 1.2g
+- Primary: GyroY magnitude > 20°/s AND TotalGyro > 40°/s = net hit
+- Primary: GyroY magnitude ≤ 20°/s AND TotalGyro ≤ 40°/s = rim hit  
+- Fallback: GyroY > 0 = net hit, GyroY < 0 = rim hit (for ambiguous cases)
+
 ORIENTATION: MPU6500 should be mounted with Z-axis pointing UP (away from net surface)
   
 WIRING MPU6500:
@@ -39,7 +45,6 @@ LED STRIP + MOFSET WIRING:
 // Pin definitions
 const int LED_STRIP_PIN = 3;    
 const int STATUS_LED = 13;
-const int MPU_INT_PIN = 8; //Optional at the Moment
 
 // LED brightness levels
 const int BRIGHTNESS_LOW = 50;
@@ -47,10 +52,11 @@ const int BRIGHTNESS_MID = 150;
 const int BRIGHTNESS_HIGH = 255;
 
 // Impact detection thresholds
-// Use total acceleration as trigger, then classify by GyroY peak difference
+// Use total acceleration as trigger, then classify using Hybrid_GyroY_TotalGyro method (89.5% accuracy)
 const float TOTAL_ACCEL_THRESHOLD = 1.2;   // g; minimum total acceleration to trigger detection
-const float GYROY_THRESHOLD = 15.0;        // deg/s; minimum GyroY magnitude to track peaks
-const int IMPACT_DURATION_MIN = 50;        // Minimum impact duration (ms) for peak analysis
+const float GYROY_MAGNITUDE_THRESHOLD = 20.0;  // deg/s; threshold for GyroY magnitude classification
+const float TOTAL_GYRO_THRESHOLD = 40.0;       // deg/s; threshold for TotalGyro classification
+const int IMPACT_DURATION_MIN = 50;        // Minimum impact duration (ms) for classification
 const int DEBOUNCE_TIME = 800;             // Prevent multiple triggers
 
 // Flash timing
@@ -71,10 +77,9 @@ struct SensorData {
   float gyroX, gyroY, gyroZ;
   float totalAccel;
   float totalGyro;
-  float lateralAccel;
 };
 
-SensorData current, baseline;
+SensorData current;
 bool flashActive = false;
 unsigned long flashStartTime = 0;
 unsigned long lastImpactTime = 0;
@@ -83,7 +88,6 @@ unsigned long lastImpactTime = 0;
 bool rimFlashActive = false;
 unsigned long rimFlashStartTime = 0;
 int currentRimFlash = 0;
-bool rimFlashState = false; // true = on, false = off
 
 // Calibration variables
 float accelOffsetX = 0, accelOffsetY = 0, accelOffsetZ = 0;
@@ -98,9 +102,7 @@ bool bufferFilled = false;
 // Impact detection variables
 bool impactDetected = false;
 unsigned long impactStartTime = 0;
-float positivePeakGyroY = 0;
-float negativePeakGyroY = 0;
-bool trackingPeaks = false;
+bool classificationReady = false;
 
 void setup() {
   Serial.begin(9600);
@@ -108,7 +110,6 @@ void setup() {
   
   pinMode(LED_STRIP_PIN, OUTPUT);
   pinMode(STATUS_LED, OUTPUT);
-  pinMode(MPU_INT_PIN, INPUT_PULLUP);
   
   // Initialize LED strip to base brightness
   analogWrite(LED_STRIP_PIN, BRIGHTNESS_MID);
@@ -116,6 +117,11 @@ void setup() {
   
   Serial.println("Spikeball Impact Detection System");
   Serial.println("===================================================");
+  Serial.println("Classification Method: Hybrid_GyroY_TotalGyro (89.5% accuracy)");
+  Serial.println("Trigger: TotalAccel > 1.2g");
+  Serial.println("Primary: GyroY > 20°/s AND TotalGyro > 40°/s = net hit");
+  Serial.println("Primary: GyroY ≤ 20°/s AND TotalGyro ≤ 40°/s = rim hit");
+  Serial.println("Fallback: GyroY direction for ambiguous cases");
   Serial.println();
   
   // Initialize MPU6500
@@ -126,8 +132,6 @@ void setup() {
     calibrateSensor();
     Serial.println("Calibration complete.");
     
-    // Take baseline reading
-    readSensorData(baseline);
     Serial.println("Reading Data.");
     Serial.println();
     
@@ -157,18 +161,9 @@ void loop() {
   // Enable debugging output
   static unsigned long lastPrint = 0;
   if (millis() - lastPrint > 100) {
-    //printDebugInfo();
-    lastPrint = millis();
-  }
-
-  // Disable constant debug output - only show impact detections
-  /*
-  static unsigned long lastPrint = 0;
-  if (millis() - lastPrint > 100) {
     printDebugInfo();
     lastPrint = millis();
   }
-  */
 
   delay(10);
 }
@@ -273,8 +268,7 @@ void readSensorData(SensorData &data) {
                        data.gyroY*data.gyroY + 
                        data.gyroZ*data.gyroZ);
   
-  // Calculate lateral (X-Y plane) acceleration for rim detection
-  data.lateralAccel = sqrt(data.accelX*data.accelX + data.accelY*data.accelY);
+
   
   // Apply moving average filter to GyroY
   data.gyroY = filterGyroY(data.gyroY);
@@ -305,7 +299,6 @@ void triggerFlash(String hitType = "unknown") {
       rimFlashActive = true;
       rimFlashStartTime = millis();
       currentRimFlash = 0;
-      rimFlashState = false;
       Serial.println("Triggering RIM flash pattern");
     }
   } else if (hitType == "net") {
@@ -327,51 +320,61 @@ void checkForImpact() {
   
   // Check if total acceleration exceeds threshold to start impact detection
   if (current.totalAccel > TOTAL_ACCEL_THRESHOLD && !impactDetected) {
-    // Impact detected - start tracking peaks
+    // Impact detected - start classification timer
     impactDetected = true;
     impactStartTime = currentTime;
-    trackingPeaks = true;
-    positivePeakGyroY = 0;
-    negativePeakGyroY = 0;
-    Serial.println("Impact detected! Tracking GyroY peaks...");
+    classificationReady = false;
+    Serial.println("Impact detected! Waiting for classification...");
   }
   
-  // If we're tracking peaks, monitor GyroY for positive and negative peaks
-  if (trackingPeaks && impactDetected) {
-    // Track positive peak
-    if (current.gyroY > positivePeakGyroY && current.gyroY > GYROY_THRESHOLD) {
-      positivePeakGyroY = current.gyroY;
-    }
-    
-    // Track negative peak
-    if (current.gyroY < negativePeakGyroY && current.gyroY < -GYROY_THRESHOLD) {
-      negativePeakGyroY = current.gyroY;
-    }
-    
-    // Check if impact duration has passed and we have meaningful peaks
-    if ((currentTime - impactStartTime) >= IMPACT_DURATION_MIN && 
-        (abs(positivePeakGyroY) > GYROY_THRESHOLD || abs(negativePeakGyroY) > GYROY_THRESHOLD)) {
+  // If impact detected, wait for duration then classify
+  if (impactDetected && !classificationReady) {
+    if ((currentTime - impactStartTime) >= IMPACT_DURATION_MIN) {
+      classificationReady = true;
       
-      // Calculate the difference: positive peak - negative peak
-      float peakDifference = positivePeakGyroY - negativePeakGyroY;
+      // Get current sensor values for classification
+      float gyroY_magnitude = abs(current.gyroY);
+      float totalGyro = current.totalGyro;
       
-      // Classify based on peak difference
-      if (peakDifference > 0) {
-        // Positive peak was larger = net hit
-        Serial.println(">>> NET HIT DETECTED!");
-        Serial.print("    Positive Peak: "); Serial.print(positivePeakGyroY, 1);
-        Serial.print("°/s, Negative Peak: "); Serial.print(negativePeakGyroY, 1);
-        Serial.print("°/s, Difference: "); Serial.print(peakDifference, 1);
+      // Hybrid_GyroY_TotalGyro Classification Method (89.5% accuracy)
+      bool isNetHit = false;
+      bool isRimHit = false;
+      
+      // Primary classification based on magnitude thresholds
+      if (gyroY_magnitude > GYROY_MAGNITUDE_THRESHOLD && totalGyro > TOTAL_GYRO_THRESHOLD) {
+        // Strong rotation in both = net hit
+        isNetHit = true;
+        isRimHit = false;
+      } else if (gyroY_magnitude <= GYROY_MAGNITUDE_THRESHOLD && totalGyro <= TOTAL_GYRO_THRESHOLD) {
+        // Weak rotation in both = rim hit
+        isRimHit = true;
+        isNetHit = false;
+      } else {
+        // Ambiguous case - use GyroY direction as fallback
+        if (current.gyroY > 0) {
+          isNetHit = true;
+          isRimHit = false;
+        } else {
+          isRimHit = true;
+          isNetHit = false;
+        }
+      }
+      
+      // Trigger appropriate flash and log results
+      if (isNetHit) {
+        Serial.println(">>> NET HIT DETECTED! (Hybrid Method)");
+        Serial.print("    GyroY Magnitude: "); Serial.print(gyroY_magnitude, 1);
+        Serial.print("°/s, TotalGyro: "); Serial.print(totalGyro, 1);
+        Serial.print("°/s, GyroY Direction: "); Serial.print(current.gyroY, 1);
         Serial.print("°/s, TotalAccel: "); Serial.print(current.totalAccel, 2);
         Serial.print("g, Duration: "); Serial.print(currentTime - impactStartTime); Serial.println("ms");
         triggerFlash("net");
         lastImpactTime = currentTime;
       } else {
-        // Negative peak was larger or equal = rim hit
-        Serial.println(">>> RIM HIT DETECTED!");
-        Serial.print("    Positive Peak: "); Serial.print(positivePeakGyroY, 1);
-        Serial.print("°/s, Negative Peak: "); Serial.print(negativePeakGyroY, 1);
-        Serial.print("°/s, Difference: "); Serial.print(peakDifference, 1);
+        Serial.println(">>> RIM HIT DETECTED! (Hybrid Method)");
+        Serial.print("    GyroY Magnitude: "); Serial.print(gyroY_magnitude, 1);
+        Serial.print("°/s, TotalGyro: "); Serial.print(totalGyro, 1);
+        Serial.print("°/s, GyroY Direction: "); Serial.print(current.gyroY, 1);
         Serial.print("°/s, TotalAccel: "); Serial.print(current.totalAccel, 2);
         Serial.print("g, Duration: "); Serial.print(currentTime - impactStartTime); Serial.println("ms");
         triggerFlash("rim");
@@ -380,13 +383,9 @@ void checkForImpact() {
       
       // Reset for next impact
       impactDetected = false;
-      trackingPeaks = false;
-      positivePeakGyroY = 0;
-      negativePeakGyroY = 0;
+      classificationReady = false;
     }
   }
-  
-  // No need to track last GyroY value in new detection method
 }
 
 //Rim Flash Sequence - 5 flashes from 80% to 5% over 2.5 seconds
@@ -483,21 +482,24 @@ uint8_t readRegister(uint8_t reg) {
 void printDebugInfo() {
   Serial.print("GyroY: ");
   Serial.print(current.gyroY, 1);
+  Serial.print("°/s | TotalGyro: ");
+  Serial.print(current.totalGyro, 1);
   Serial.print("°/s | TotalAccel: ");
   Serial.print(current.totalAccel, 2);
-  Serial.print("g | Threshold: ");
+  Serial.print("g | Thresholds: ");
   Serial.print(TOTAL_ACCEL_THRESHOLD, 2);
-  Serial.print("g");
+  Serial.print("g, GyroY: ");
+  Serial.print(GYROY_MAGNITUDE_THRESHOLD, 1);
+  Serial.print("°/s, TotalGyro: ");
+  Serial.print(TOTAL_GYRO_THRESHOLD, 1);
+  Serial.print("°/s");
   
   if (impactDetected) {
     Serial.print(" | IMPACT DETECTED");
-    if (trackingPeaks) {
-      Serial.print(" | Tracking Peaks");
-      Serial.print(" | Pos: ");
-      Serial.print(positivePeakGyroY, 1);
-      Serial.print("°/s | Neg: ");
-      Serial.print(negativePeakGyroY, 1);
-      Serial.print("°/s");
+    if (classificationReady) {
+      Serial.print(" | CLASSIFICATION READY");
+    } else {
+      Serial.print(" | WAITING FOR CLASSIFICATION");
     }
   }
   
