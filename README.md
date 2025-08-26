@@ -4,7 +4,7 @@
 </p>
 <b>What It Does:</b>
 
-Detects rim hits vs net shots using MPU6500 accelerometer analysis with instant LED strip feedback with flash sequences
+Detects rim hits vs net shots using MPU6500 accelerometer/gyroscope analysis with instant LED strip feedback with flash sequences
 
 <b>Technical Specs:</b>
 
