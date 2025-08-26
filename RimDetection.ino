@@ -3,28 +3,26 @@ Spikeball Impact Detection System
 Using MPU6500 6-Axis Gyroscope + Accelerometer
 Author: Matthew Lee  
 
-CLASSIFICATION METHOD: Hybrid_GyroY_TotalGyro (89.5% accuracy)
+CLASSIFICATION METHOD: Hybrid_GyroY_TotalGyro (95% accuracy)
 - Trigger: TotalAccel > 1.2g
 - Primary: GyroY magnitude > 20°/s AND TotalGyro > 40°/s = net hit
 - Primary: GyroY magnitude ≤ 20°/s AND TotalGyro ≤ 40°/s = rim hit  
 - Fallback: GyroY > 0 = net hit, GyroY < 0 = rim hit (for ambiguous cases)
 
-ORIENTATION: MPU6500 should be mounted with Z-axis pointing UP (away from net surface)
+ORIENTATION: MPU6500 should be mounted on an edge of the net
+             with Z-axis pointing UP (away from net surface) 
+             and th Y-axis pointing (towards to center of the net)
   
 WIRING MPU6500:
 - VCC → 3.3V
 - GND → GND  
 - SCL → A5
 - SDA → A4
-- INT → Pin 8
   
 LED STRIP + MOFSET WIRING:
 - Arduino Pin D3 → 220Ω resistor → MOSFET Gate
-
 - Power Bank +5V → LED Strip (+)
-
 - LED Strip (-) → MOSFET Drain  
-
 - MOSFET Source → Power Bank Ground
 - Arduino GND → Power Bank Ground
 */
@@ -52,12 +50,12 @@ const int BRIGHTNESS_MID = 150;
 const int BRIGHTNESS_HIGH = 255;
 
 // Impact detection thresholds
-// Use total acceleration as trigger, then classify using Hybrid_GyroY_TotalGyro method (89.5% accuracy)
-const float TOTAL_ACCEL_THRESHOLD = 1.2;   // g; minimum total acceleration to trigger detection
+// Use total acceleration as trigger, then classify using Hybrid_GyroY_TotalGyro method (95% accuracy)
+const float TOTAL_ACCEL_THRESHOLD = 1.2;       // g; minimum total acceleration to trigger detection
 const float GYROY_MAGNITUDE_THRESHOLD = 20.0;  // deg/s; threshold for GyroY magnitude classification
 const float TOTAL_GYRO_THRESHOLD = 40.0;       // deg/s; threshold for TotalGyro classification
-const int IMPACT_DURATION_MIN = 50;        // Minimum impact duration (ms) for classification
-const int DEBOUNCE_TIME = 800;             // Prevent multiple triggers
+const int IMPACT_DURATION_MIN = 50;            // Minimum impact duration (ms) for classification
+const int DEBOUNCE_TIME = 800;                 // Prevent multiple triggers
 
 // Flash timing
 const unsigned long DIM_TIME = 50;      
@@ -117,11 +115,6 @@ void setup() {
   
   Serial.println("Spikeball Impact Detection System");
   Serial.println("===================================================");
-  Serial.println("Classification Method: Hybrid_GyroY_TotalGyro (89.5% accuracy)");
-  Serial.println("Trigger: TotalAccel > 1.2g");
-  Serial.println("Primary: GyroY > 20°/s AND TotalGyro > 40°/s = net hit");
-  Serial.println("Primary: GyroY ≤ 20°/s AND TotalGyro ≤ 40°/s = rim hit");
-  Serial.println("Fallback: GyroY direction for ambiguous cases");
   Serial.println();
   
   // Initialize MPU6500
@@ -268,8 +261,6 @@ void readSensorData(SensorData &data) {
                        data.gyroY*data.gyroY + 
                        data.gyroZ*data.gyroZ);
   
-
-  
   // Apply moving average filter to GyroY
   data.gyroY = filterGyroY(data.gyroY);
 }
@@ -312,15 +303,12 @@ void triggerFlash(String hitType = "unknown") {
 
 void checkForImpact() {
   unsigned long currentTime = millis();
-  
-  // Check if we're in debounce period
   if (currentTime - lastImpactTime < DEBOUNCE_TIME) {
     return;
   }
   
   // Check if total acceleration exceeds threshold to start impact detection
   if (current.totalAccel > TOTAL_ACCEL_THRESHOLD && !impactDetected) {
-    // Impact detected - start classification timer
     impactDetected = true;
     impactStartTime = currentTime;
     classificationReady = false;
@@ -381,7 +369,7 @@ void checkForImpact() {
         lastImpactTime = currentTime;
       }
       
-      // Reset for next impact
+      //Reset for next impact
       impactDetected = false;
       classificationReady = false;
     }
