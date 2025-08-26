@@ -6,8 +6,6 @@
 
 Detects rim hits vs net shots using MPU6500 accelerometer analysis
 Instant LED strip feedback with flash sequences
-Smart detection logic: lateral acceleration = rim hit, vertical = net shot
-Fast response: 2ms sampling with 400ms debounce protection
 
 <b>Technical Specs:</b>
 
@@ -17,8 +15,6 @@ Fast response: 2ms sampling with 400ms debounce protection
 
 <hr>
 <div align="center">
-  <strong>Status:</strong> Working prototype | 
+  <strong>Status:</strong> Working Project
   <strong>Components:</strong> Arduino Nano + MPU6500 + LED strip
-  <br><br>
-  <em>Circuit diagrams and demo videos coming soon</em>
 </div>
