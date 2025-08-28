@@ -158,7 +158,7 @@ void loop() {
     lastPrint = millis();
   }
 
-  delay(10);
+  delay(2);
 }
 
 bool initMPU6500() {
